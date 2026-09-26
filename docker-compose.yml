@@ -1,0 +1,52 @@
+version: "3.8"
+
+services:
+  controlnode:
+    build: ./controlnode
+    ports:
+      - "8000:8000"
+
+  datanode1:
+    build: ./datanode
+    ports:
+      - "8001:8000"
+    environment:
+      - CONTROL_URL=http://controlnode:8000
+      - DATANODE_ID=dn1
+      - DATANODE_URL=http://localhost:8001
+    volumes:
+      - data1:/app/blocks
+    depends_on:
+      - controlnode
+
+  datanode2:
+    build: ./datanode
+    ports:
+      - "8002:8000"
+    environment:
+      - CONTROL_URL=http://controlnode:8000
+      - DATANODE_ID=dn2
+      - DATANODE_URL=http://localhost:8002
+    volumes:
+      - data2:/app/blocks
+    depends_on:
+      - controlnode
+
+  datanode3:
+    build: ./datanode
+    ports:
+      - "8003:8000"
+    environment:
+      - CONTROL_URL=http://controlnode:8000
+      - DATANODE_ID=dn3
+      - DATANODE_URL=http://localhost:8003
+    volumes:
+      - data3:/app/blocks
+    depends_on:
+      - controlnode
+
+volumes:
+  data1:
+  data2:
+  data3:
+  
