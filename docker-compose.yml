@@ -1,10 +1,17 @@
-version: "3.8"
-
 services:
   controlnode:
     build: ./controlnode
     ports:
       - "8000:8000"
+    environment:
+      - DFSHA_STATE_FILE=/app/data/state.json
+      - DFSHA_INTERNAL_SECRET=${DFSHA_INTERNAL_SECRET:-local-dfsha-secret-change-before-deploy}
+      - DFSHA_TOTP_ENCRYPTION_KEY=${DFSHA_TOTP_ENCRYPTION_KEY:-}
+      - DFSHA_VALE_PASSWORD=${DFSHA_VALE_PASSWORD:-vale123}
+      - DFSHA_ADMIN_PASSWORD=${DFSHA_ADMIN_PASSWORD:-admin123}
+      - REPLICATION_FACTOR=${REPLICATION_FACTOR:-2}
+    volumes:
+      - controlstate:/app/data
 
   datanode1:
     build: ./datanode
@@ -13,7 +20,10 @@ services:
     environment:
       - CONTROL_URL=http://controlnode:8000
       - DATANODE_ID=dn1
-      - DATANODE_URL=http://localhost:8001
+      - DATANODE_URL=${DFSHA_DATANODE1_URL:-http://localhost:8001}
+      - DATANODE_INTERNAL_URL=http://datanode1:8000
+      - DFSHA_INTERNAL_SECRET=${DFSHA_INTERNAL_SECRET:-local-dfsha-secret-change-before-deploy}
+      - DFSHA_BLOCK_ENCRYPTION_KEY=${DFSHA_BLOCK_ENCRYPTION_KEY:-}
     volumes:
       - data1:/app/blocks
     depends_on:
@@ -26,7 +36,10 @@ services:
     environment:
       - CONTROL_URL=http://controlnode:8000
       - DATANODE_ID=dn2
-      - DATANODE_URL=http://localhost:8002
+      - DATANODE_URL=${DFSHA_DATANODE2_URL:-http://localhost:8002}
+      - DATANODE_INTERNAL_URL=http://datanode2:8000
+      - DFSHA_INTERNAL_SECRET=${DFSHA_INTERNAL_SECRET:-local-dfsha-secret-change-before-deploy}
+      - DFSHA_BLOCK_ENCRYPTION_KEY=${DFSHA_BLOCK_ENCRYPTION_KEY:-}
     volumes:
       - data2:/app/blocks
     depends_on:
@@ -39,13 +52,17 @@ services:
     environment:
       - CONTROL_URL=http://controlnode:8000
       - DATANODE_ID=dn3
-      - DATANODE_URL=http://localhost:8003
+      - DATANODE_URL=${DFSHA_DATANODE3_URL:-http://localhost:8003}
+      - DATANODE_INTERNAL_URL=http://datanode3:8000
+      - DFSHA_INTERNAL_SECRET=${DFSHA_INTERNAL_SECRET:-local-dfsha-secret-change-before-deploy}
+      - DFSHA_BLOCK_ENCRYPTION_KEY=${DFSHA_BLOCK_ENCRYPTION_KEY:-}
     volumes:
       - data3:/app/blocks
     depends_on:
       - controlnode
 
 volumes:
+  controlstate:
   data1:
   data2:
   data3:
