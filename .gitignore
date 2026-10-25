@@ -6,3 +6,5 @@ venv/
 blocks/
 *.log
 *.bin
+certs/
+.pytest_cache/

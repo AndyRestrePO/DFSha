@@ -14,6 +14,9 @@ USER = os.environ.get("DFSHA_USER")
 PASSWORD = os.environ.get("DFSHA_PASSWORD")
 TOTP_CODE = os.environ.get("DFSHA_TOTP_CODE")
 API_KEY = os.environ.get("DFSHA_API_KEY")
+# si los nodos usan TLS con nuestra propia CA, httpx la toma de SSL_CERT_FILE
+if os.environ.get("DFSHA_CA_CERT"):
+    os.environ.setdefault("SSL_CERT_FILE", os.environ["DFSHA_CA_CERT"])
 
 
 def _auth():
@@ -240,6 +243,22 @@ def cmd_api_key_delete(args):
     print(r.json())
 
 
+def cmd_status(args):
+    r = httpx.get(f"{CONTROL_URL}/admin/cluster", **_auth_kwargs())
+    _check(r)
+    info = r.json()
+    print(f"Archivos: {info['files']}  Bloques: {info['blocks']}  "
+          f"Factor de replicacion: {info['replication_factor']}  "
+          f"Sub-replicados: {info['under_replicated']}")
+    for node in info["datanodes"]:
+        estado = "ACTIVO" if node["active"] else "CAIDO"
+        print(f"  {node['datanode_id']:<6} {estado:<7} bloques={node['blocks']:<4} "
+              f"ultimo heartbeat hace {node['seconds_since_heartbeat']}s  {node['url']}")
+    m = info["maintenance"]
+    print(f"Mantenimiento: {m['runs']} rondas, {m['blocks_repaired']} bloques re-replicados, "
+          f"{m['orphans_deleted']} huerfanos borrados, {m['lost_blocks']} bloques sin replicas vivas")
+
+
 def cmd_shell(args):
     cwd = "/"
     print("DFSha shell. Usa 'exit' para salir.")
@@ -285,6 +304,8 @@ def cmd_shell(args):
             namespace = argparse.Namespace(remote=_remote_path(values[0], cwd), local=values[1])
         elif command == "login" and not values:
             handler, namespace = cmd_login, argparse.Namespace()
+        elif command == "status" and not values:
+            handler, namespace = cmd_status, argparse.Namespace()
         else:
             print("Comando o argumentos invalidos")
             continue
@@ -367,6 +388,7 @@ def main():
     p.add_argument("key_id")
     p.set_defaults(func=cmd_api_key_delete)
 
+    sub.add_parser("status").set_defaults(func=cmd_status)
     sub.add_parser("shell").set_defaults(func=cmd_shell)
 
     args = parser.parse_args()

@@ -86,7 +86,7 @@ async def lifespan(app: FastAPI):
     task.cancel()
 
 
-app = FastAPI(title=f"DFSha DataNode ({DATANODE_ID})", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title=f"DFSha DataNode ({DATANODE_ID})", version="1.0.0", lifespan=lifespan)
 
 
 def _block_path(block_id: str) -> str:
@@ -169,6 +169,23 @@ def block_status(block_id: str, request: Request):
     }
 
 
+@app.get("/blocks")
+def list_blocks(request: Request):
+    # solo el ControlNode lo usa, para encontrar bloques huerfanos
+    secret = request.headers.get("X-Internal-Secret")
+    if not secret or not hmac.compare_digest(secret, INTERNAL_SECRET):
+        raise HTTPException(status_code=401, detail="Credencial interna invalida")
+    now = time.time()
+    bloques = []
+    for name in os.listdir(BLOCK_DIR):
+        if name.endswith(".tmp"):
+            continue
+        path = _block_path(name)
+        bloques.append({"block_id": name, "age": round(now - os.path.getmtime(path), 1)})
+    return {"datanode_id": DATANODE_ID, "blocks": bloques}
+
+
 @app.get("/health")
 def health():
-    return {"status": "ok", "datanode_id": DATANODE_ID}
+    usados = sum(1 for name in os.listdir(BLOCK_DIR) if not name.endswith(".tmp"))
+    return {"status": "ok", "datanode_id": DATANODE_ID, "blocks": usados}

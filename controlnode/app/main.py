@@ -8,6 +8,7 @@ import secrets
 import time
 import uuid
 import threading
+from contextlib import asynccontextmanager
 from itertools import count
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -18,15 +19,15 @@ from fastapi import FastAPI, HTTPException, Depends, Header, status
 from fastapi.security import APIKeyHeader, HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-app = FastAPI(title="DFSha ControlNode", version="0.3.0")
-security = HTTPBasic(auto_error=False)
-api_key_security = APIKeyHeader(name="X-API-Key", auto_error=False)
-
 # ---------------------------------------------------------------------------
 # Configuracion
 # ---------------------------------------------------------------------------
 BLOCK_SIZE = 4 * 1024 * 1024
-HEARTBEAT_TIMEOUT = 15
+HEARTBEAT_TIMEOUT = max(3, int(os.environ.get("HEARTBEAT_TIMEOUT", "15")))
+# cada cuanto se revisa si hay bloques con menos replicas de las debidas
+REPAIR_INTERVAL = max(2, int(os.environ.get("REPAIR_INTERVAL", "10")))
+# un bloque huerfano solo se borra si lleva al menos este tiempo en disco
+ORPHAN_GRACE = int(os.environ.get("ORPHAN_GRACE", "120"))
 REPLICATION_FACTOR = max(1, int(os.environ.get("REPLICATION_FACTOR", "2")))
 HANDLE_TIMEOUT = max(60, int(os.environ.get("HANDLE_TIMEOUT", "300")))
 STATE_FILE = Path(os.environ.get("DFSHA_STATE_FILE", "/app/data/state.json"))
@@ -51,6 +52,22 @@ api_keys: Dict[str, dict] = {}
 open_handles: Dict[str, dict] = {}
 file_locks: Dict[str, str] = {}
 _rr_counter = count()                  # contador para el round-robin
+repair_stats = {"runs": 0, "blocks_repaired": 0, "orphans_deleted": 0, "lost_blocks": 0, "last_run": None}
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # hilo de mantenimiento: re-replica bloques y limpia huerfanos
+    stop = threading.Event()
+    worker = threading.Thread(target=_repair_loop, args=(stop,), daemon=True)
+    worker.start()
+    yield
+    stop.set()
+
+
+app = FastAPI(title="DFSha ControlNode", version="1.0.0", lifespan=lifespan)
+security = HTTPBasic(auto_error=False)
+api_key_security = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
 def _password_record(password: str, salt: Optional[bytes] = None) -> dict:
@@ -929,6 +946,187 @@ def close_file(req: HandleRequest, user: str = Depends(get_current_user)):
             del file_locks[session["path"]]
         del open_handles[req.handle]
     return {"status": "closed"}
+
+
+# ---------------------------------------------------------------------------
+# Mantenimiento: re-replicacion y limpieza de bloques huerfanos (Hito 4)
+# ---------------------------------------------------------------------------
+def _node_url(node_id: str) -> Optional[str]:
+    node = datanodes.get(node_id)
+    if not node:
+        return None
+    return node.get("internal_url", node["url"])
+
+
+def _blocks_per_node() -> Dict[str, int]:
+    load = {node_id: 0 for node_id in datanodes}
+    for meta in files.values():
+        for block in meta["blocks"]:
+            for node_id in block.get("replicas", [block["datanode_id"]]):
+                load[node_id] = load.get(node_id, 0) + 1
+    return load
+
+
+def _repair_blocks() -> int:
+    """Busca bloques con menos replicas vivas que REPLICATION_FACTOR y los copia
+    desde una replica sana hacia otro DataNode activo."""
+    import httpx
+
+    with lock:
+        active = set(_active_datanodes())
+        load = _blocks_per_node()
+        pending = []
+        lost = 0
+        for path, meta in files.items():
+            if not meta.get("ready", True):
+                continue
+            for block in meta["blocks"]:
+                replicas = block.get("replicas", [block["datanode_id"]])
+                alive = [node_id for node_id in replicas if node_id in active]
+                if not alive:
+                    lost += 1
+                elif len(alive) < REPLICATION_FACTOR:
+                    pending.append((path, block["block_id"], list(replicas), alive))
+        repair_stats["lost_blocks"] = lost
+
+    repaired = 0
+    for path, block_id, replicas, alive in pending:
+        faltan = REPLICATION_FACTOR - len(alive)
+        # preferimos los nodos con menos bloques para no desbalancear
+        destinos = sorted(active - set(replicas), key=lambda node_id: (load.get(node_id, 0), node_id))[:faltan]
+        if not destinos:
+            continue
+        token = _block_token(block_id)
+        data = None
+        for node_id in alive:
+            try:
+                response = httpx.get(f"{_node_url(node_id)}/block/{block_id}",
+                                     headers={"X-Block-Token": token}, timeout=10)
+                response.raise_for_status()
+                data = response.content
+                break
+            except httpx.HTTPError:
+                continue
+        if data is None:
+            continue
+
+        copiados = []
+        for node_id in destinos:
+            try:
+                response = httpx.put(f"{_node_url(node_id)}/block/{block_id}", content=data,
+                                     headers={"X-Block-Token": token}, timeout=30)
+                response.raise_for_status()
+                copiados.append(node_id)
+                load[node_id] = load.get(node_id, 0) + 1
+            except httpx.HTTPError:
+                continue
+        if not copiados:
+            continue
+
+        with lock:
+            # el archivo pudo cambiar mientras copiabamos; solo actualizamos si el bloque sigue ahi
+            meta = files.get(path)
+            block = None
+            if meta:
+                block = next((b for b in meta["blocks"] if b["block_id"] == block_id), None)
+            if block is not None:
+                block["replicas"] = alive + copiados
+                block["datanode_id"] = block["replicas"][0]
+                _save_state()
+                repaired += 1
+                print(f"[repair] bloque {block_id} de {path}: {alive} + {copiados}")
+        if block is None:
+            for node_id in copiados:
+                try:
+                    httpx.delete(f"{_node_url(node_id)}/block/{block_id}",
+                                 headers={"X-Block-Token": token}, timeout=3)
+                except httpx.HTTPError:
+                    pass
+    return repaired
+
+
+def _collect_orphans() -> int:
+    """Borra de los DataNodes los bloques que ya no aparecen en la metadata
+    (por ejemplo, copias viejas de un nodo que estuvo caido y volvio)."""
+    import httpx
+
+    with lock:
+        active = list(_active_datanodes())
+    deleted = 0
+    for node_id in active:
+        url = _node_url(node_id)
+        try:
+            response = httpx.get(f"{url}/blocks", headers={"X-Internal-Secret": INTERNAL_SECRET}, timeout=5)
+            response.raise_for_status()
+            stored = response.json()["blocks"]
+        except (httpx.HTTPError, KeyError, ValueError):
+            continue
+        # la metadata se mira DESPUES de listar el disco: asi un bloque recien
+        # creado ya aparece referenciado y no se borra por error
+        with lock:
+            referenced = {
+                block["block_id"]: set(block.get("replicas", [block["datanode_id"]]))
+                for meta in files.values() for block in meta["blocks"]
+            }
+        for item in stored:
+            block_id = item["block_id"]
+            if item.get("age", 0) < ORPHAN_GRACE:
+                continue
+            if node_id in referenced.get(block_id, set()):
+                continue
+            try:
+                httpx.delete(f"{url}/block/{block_id}",
+                             headers={"X-Block-Token": _block_token(block_id)}, timeout=3)
+                deleted += 1
+            except httpx.HTTPError:
+                pass
+    return deleted
+
+
+def _repair_loop(stop: threading.Event) -> None:
+    while not stop.wait(REPAIR_INTERVAL):
+        try:
+            repair_stats["blocks_repaired"] += _repair_blocks()
+            repair_stats["orphans_deleted"] += _collect_orphans()
+            repair_stats["runs"] += 1
+            repair_stats["last_run"] = time.time()
+        except Exception as exc:  # el hilo no se puede morir por un error puntual
+            print(f"[repair] error: {exc}")
+
+
+@app.get("/admin/cluster")
+def cluster_status(user: str = Depends(get_current_user)):
+    if not _is_admin(user):
+        raise HTTPException(status_code=403, detail="Solo admin puede ver el estado del cluster")
+    with lock:
+        active = set(_active_datanodes())
+        load = _blocks_per_node()
+        sub_replicados = 0
+        total_bloques = 0
+        for meta in files.values():
+            for block in meta["blocks"]:
+                total_bloques += 1
+                vivos = [n for n in block.get("replicas", [block["datanode_id"]]) if n in active]
+                if len(vivos) < REPLICATION_FACTOR:
+                    sub_replicados += 1
+        return {
+            "replication_factor": REPLICATION_FACTOR,
+            "block_size": BLOCK_SIZE,
+            "files": len(files),
+            "blocks": total_bloques,
+            "under_replicated": sub_replicados,
+            "datanodes": [
+                {
+                    "datanode_id": node_id,
+                    "url": info["url"],
+                    "active": node_id in active,
+                    "seconds_since_heartbeat": round(time.time() - info["last_heartbeat"], 1),
+                    "blocks": load.get(node_id, 0),
+                }
+                for node_id, info in sorted(datanodes.items())
+            ],
+            "maintenance": dict(repair_stats),
+        }
 
 
 # ---------------------------------------------------------------------------

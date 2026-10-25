@@ -1,6 +1,7 @@
 services:
   controlnode:
     build: ./controlnode
+    restart: unless-stopped
     ports:
       - "8000:8000"
     environment:
@@ -10,11 +11,14 @@ services:
       - DFSHA_VALE_PASSWORD=${DFSHA_VALE_PASSWORD:-vale123}
       - DFSHA_ADMIN_PASSWORD=${DFSHA_ADMIN_PASSWORD:-admin123}
       - REPLICATION_FACTOR=${REPLICATION_FACTOR:-2}
+      - HEARTBEAT_TIMEOUT=${HEARTBEAT_TIMEOUT:-15}
+      - REPAIR_INTERVAL=${REPAIR_INTERVAL:-10}
     volumes:
       - controlstate:/app/data
 
   datanode1:
     build: ./datanode
+    restart: unless-stopped
     ports:
       - "8001:8000"
     environment:
@@ -31,6 +35,7 @@ services:
 
   datanode2:
     build: ./datanode
+    restart: unless-stopped
     ports:
       - "8002:8000"
     environment:
@@ -47,6 +52,7 @@ services:
 
   datanode3:
     build: ./datanode
+    restart: unless-stopped
     ports:
       - "8003:8000"
     environment:

@@ -1,0 +1,41 @@
+# Override para correr todo el cluster con TLS (HTTPS) entre todos los nodos.
+# Primero: ./scripts/gen_certs.sh [ip publica]
+# Luego:   docker compose -f docker-compose.yml -f docker-compose.tls.yml up --build
+x-tls-env: &tls-env
+  TLS_CERT: /certs/node.crt
+  TLS_KEY: /certs/node.key
+  SSL_CERT_FILE: /certs/ca.crt
+
+services:
+  controlnode:
+    environment:
+      <<: *tls-env
+    volumes:
+      - ./certs:/certs:ro
+
+  datanode1:
+    environment:
+      <<: *tls-env
+      CONTROL_URL: https://controlnode:8000
+      DATANODE_URL: ${DFSHA_DATANODE1_URL:-https://localhost:8001}
+      DATANODE_INTERNAL_URL: https://datanode1:8000
+    volumes:
+      - ./certs:/certs:ro
+
+  datanode2:
+    environment:
+      <<: *tls-env
+      CONTROL_URL: https://controlnode:8000
+      DATANODE_URL: ${DFSHA_DATANODE2_URL:-https://localhost:8002}
+      DATANODE_INTERNAL_URL: https://datanode2:8000
+    volumes:
+      - ./certs:/certs:ro
+
+  datanode3:
+    environment:
+      <<: *tls-env
+      CONTROL_URL: https://controlnode:8000
+      DATANODE_URL: ${DFSHA_DATANODE3_URL:-https://localhost:8003}
+      DATANODE_INTERNAL_URL: https://datanode3:8000
+    volumes:
+      - ./certs:/certs:ro
