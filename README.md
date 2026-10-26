@@ -4,7 +4,7 @@ Proyecto 1 de **ST0263 Tópicos Especiales en Telemática / SI3007 Sistemas Dist
 
 DFSha es un sistema de archivos distribuido **por bloques**, inspirado en HDFS/GFS, con arquitectura **Cliente/Servidor (Opción 1)**. Un cliente puede subir y bajar archivos grandes; cada archivo se parte en bloques de 4 MB que se reparten entre varios DataNodes y cada bloque se guarda en 2 nodos distintos.
 
-**Integrantes:** Andrés Restrepo Giraldo · Valentina Zapata Acosta · _(completar)_
+**Integrantes:** Andrés Restrepo Giraldo · Valentina Zapata Acosta · Sebastián Granda Giraldo
 
 ---
 
